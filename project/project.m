@@ -70,19 +70,25 @@ gainsPlot.YDataSource = 'inputEq.Gains';
 %ylim([-1 inf])
 hold off
 
-bassOctaves = logical([1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
-midOctaves =  logical([0, 0, 0, 0, 1, 1, 1, 1, 0, 0]);
-trebOctaves = logical([0, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
-bassFreqRange = [22, 355];
-midFreqRange = [355, 5623];
-trebFreqRange = [5623, 22387];
+bassBand = struct( ...
+    'octaves', logical([1, 1, 1, 1, 0, 0, 0, 0, 0, 0]), ...
+    'freqRange', [22, 355], ...
+    'inOutFreqDiffs', [], ...
+    'outFreqSums', []);
 
-bassInOutFreqDiffs = [];
-bassOutFreqSums = [];
-midInOutFreqDiffs = [];
-midOutFreqSums = [];
-trebInOutFreqDiffs = [];
-trebOutFreqSums = [];
+midBand = struct( ...
+    'octaves', logical([0, 0, 0, 0, 1, 1, 1, 1, 0, 0]), ...
+    'freqRange', [355, 5623], ...
+    'inOutFreqDiffs', [], ...
+    'outFreqSums', []);
+
+trebBand = struct( ...
+    'octaves', logical([0, 0, 0, 0, 0, 0, 0, 0, 1, 1]), ...
+    'freqRange', [5623, 22387], ...
+    'inOutFreqDiffs', [], ...
+    'outFreqSums', []);
+
+bands = [bassBand midBand trebBand];
 
 frameCount = 0;
 framePeriod = 20;
@@ -100,33 +106,15 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
     [outputFreqX, outputFreqY] = perform_and_plot_fft(outputFrame, sampleRate, maxFrequency);
     [inputFreqX, inputFreqY] = perform_and_plot_fft(inputFrame, sampleRate, maxFrequency);
 
-    % bass:
-    bassFreqs = outputFreqX(:) >= bassFreqRange(1) & outputFreqX(:) < bassFreqRange(2); % outputFreqX should be same as inputFreqX
-    if isempty(bassInOutFreqDiffs)
-        bassInOutFreqDiffs = zeros(sum(bassFreqs), 1);
-        bassOutFreqSums = zeros(sum(bassFreqs), 1);
+    for i = 1:numel(bands)
+        bandFreqs = outputFreqX(:) >= bands(i).freqRange(1) & outputFreqX(:) < bands(i).freqRange(2); % outputFreqX should be same as inputFreqX
+        if isempty(bands(i).inOutFreqDiffs)
+            bands(i).inOutFreqDiffs = zeros(sum(bandFreqs), 1);
+            bands(i).outFreqSums = zeros(sum(bandFreqs), 1);
+        end
+        bands(i).inOutFreqDiffs = bands(i).inOutFreqDiffs + (inputFreqY(bandFreqs) - outputFreqY(bandFreqs));
+        bands(i).outFreqSums = bands(i).outFreqSums + outputFreqY(bandFreqs);
     end
-    bassInOutFreqDiffs = bassInOutFreqDiffs + (inputFreqY(bassFreqs) - outputFreqY(bassFreqs));
-    bassOutFreqSums = bassOutFreqSums + outputFreqY(bassFreqs);
-
-    % mid:
-    midFreqs = outputFreqX(:) >= midFreqRange(1) & outputFreqX(:) < midFreqRange(2); % outputFreqX should be same as inputFreqX
-    if isempty(midInOutFreqDiffs)
-        midInOutFreqDiffs = zeros(sum(midFreqs), 1);
-        midOutFreqSums = zeros(sum(midFreqs), 1);
-    end
-    midInOutFreqDiffs = midInOutFreqDiffs + (inputFreqY(midFreqs) - outputFreqY(midFreqs));
-    midOutFreqSums = midOutFreqSums + outputFreqY(midFreqs);
-
-    % treb:
-    trebFreqs = outputFreqX(:) >= trebFreqRange(1) & outputFreqX(:) < trebFreqRange(2); % outputFreqX should be same as inputFreqX
-    if isempty(trebInOutFreqDiffs)
-        trebInOutFreqDiffs = zeros(sum(trebFreqs), 1);
-        trebOutFreqSums = zeros(sum(trebFreqs), 1);
-    end
-    trebInOutFreqDiffs = trebInOutFreqDiffs + (inputFreqY(trebFreqs) - outputFreqY(trebFreqs));
-    trebOutFreqSums = trebOutFreqSums + outputFreqY(trebFreqs);
-
 
     if mod(frameCount, framePeriod) == 0 && frameCount ~= 0
         disp('Calculating new gains')
@@ -134,39 +122,17 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
         % always >= 0
         % TODO: Set max limits for gains to prevent distortion
 
-        % bass:
-        bassDiffs = bassInOutFreqDiffs / framePeriod;
-        bassOutSums = bassOutFreqSums / framePeriod;
-        if sum(bassDiffs) > sum(bassOutSums)
-            disp('Updating bass gains')
-            inputEq.Gains(bassOctaves) = inputEq.Gains(bassOctaves) + 1;
-            disp(inputEq.Gains)
+        for i = 1:numel(bands)
+            bandDiffs = bands(i).inOutFreqDiffs / framePeriod;
+            bandOutSums = bands(i).outFreqSums / framePeriod;
+            if sum(bandDiffs) > sum(bandOutSums)
+                disp('Updating gains for band')
+                inputEq.Gains(bands(i).octaves) = inputEq.Gains(bands(i).octaves) + 1;
+                disp(inputEq.Gains)
+            end
+            bands(i).inOutFreqDiffs(:) = 0;
+            bands(i).outFreqSums(:) = 0;
         end
-        bassInOutFreqDiffs(:) = 0;
-        bassOutFreqSums(:) = 0;
-
-        % mid
-        midDiffs = midInOutFreqDiffs / framePeriod;
-        midOutSums = midOutFreqSums / framePeriod;
-        if sum(midDiffs) > sum(midOutSums)
-            disp('Updating mid gains')
-            inputEq.Gains(midOctaves) = inputEq.Gains(midOctaves) + 1;
-            disp(inputEq.Gains)
-        end
-        midInOutFreqDiffs(:) = 0;
-        midOutFreqSums(:) = 0;
-
-        % treb:
-        trebDiffs = trebInOutFreqDiffs / framePeriod;
-        trebOutSums = trebOutFreqSums / framePeriod;
-        if sum(trebDiffs) > sum(trebOutSums)
-            disp('Updating treb gains')
-            inputEq.Gains(trebOctaves) = inputEq.Gains(trebOctaves) + 1;
-            disp(inputEq.Gains)
-        end
-        trebInOutFreqDiffs(:) = 0;
-        trebOutFreqSums(:) = 0;
-
     end
 
     if mod(frameCount, redrawPeriod) == 0

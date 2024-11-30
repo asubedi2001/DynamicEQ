@@ -17,6 +17,11 @@ sampleRate = songReader.SampleRate;
 % writer -- outputs to speakers:
 deviceWriter = audioDeviceWriter('SampleRate', songReader.SampleRate);
 
+% create frame buffer
+bufferSize = 8;
+frameBuffer = zeros(frameLength, bufferSize);
+bufferIdx = 1;
+
 % used to display sound waves while playing:
 scope = timescope( ...
     'SampleRate', songReader.SampleRate, ...
@@ -74,19 +79,25 @@ bassBand = struct( ...
     'octaves', logical([1, 1, 1, 1, 0, 0, 0, 0, 0, 0]), ...
     'freqRange', [22, 355], ...
     'inOutFreqDiffs', [], ...
-    'outFreqSums', []);
+    'outFreqSums', [], ...
+    'movingAvg', [] ...
+    );
 
 midBand = struct( ...
     'octaves', logical([0, 0, 0, 0, 1, 1, 1, 1, 0, 0]), ...
     'freqRange', [355, 5623], ...
     'inOutFreqDiffs', [], ...
-    'outFreqSums', []);
+    'outFreqSums', [], ...
+    'movingAvg', [] ...
+    );
 
 trebBand = struct( ...
     'octaves', logical([0, 0, 0, 0, 0, 0, 0, 0, 1, 1]), ...
     'freqRange', [5623, 22387], ...
     'inOutFreqDiffs', [], ...
-    'outFreqSums', []);
+    'outFreqSums', [], ...
+    'movingAvg', [] ...4
+    );
 
 bands = [bassBand midBand trebBand];
 
@@ -100,6 +111,10 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
     %noiseFrame = wgn(frameLength,1,-25);
     inputFrame = outputFrame + noiseFrame;
 
+    % update buffer (and index) according to current frame
+    frameBuffer(:, bufferIdx) = inputFrame;
+    bufferIdx = mod(bufferIdx, bufferSize) + 1;
+
     deviceWriter(inputFrame);
     scope(inputFrame)
 
@@ -111,9 +126,25 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
         if isempty(bands(i).inOutFreqDiffs)
             bands(i).inOutFreqDiffs = zeros(sum(bandFreqs), 1);
             bands(i).outFreqSums = zeros(sum(bandFreqs), 1);
+            bands(i).movingAvg = zeros(sum(bandFreqs), 1);
         end
         bands(i).inOutFreqDiffs = bands(i).inOutFreqDiffs + (inputFreqY(bandFreqs) - outputFreqY(bandFreqs));
         bands(i).outFreqSums = bands(i).outFreqSums + outputFreqY(bandFreqs);
+
+        % update moving average
+        if frameCount == 0
+            % initialize first frame value
+            bands(i).movingAvg = bands(i).inOutFreqDiffs;
+        elseif frameCount <= bufferSize
+            % if buffer is not full update b += (difference - b) / numFrames
+            bands(i).movingAvg = bands(i).movingAvg + (bands(i).inOutFreqDiffs - bands(i).movingAvg) / frameCount;
+        else
+            % if buffer full, update according to the last value 
+            oldestFrameIdx = mod(bufferIdx, bufferSize) + 1;
+            oldestFreqDiff = frameBuffer(:, oldestFrameIdx);
+            % b += (difference - (difference bufferSize ago)) / bufferSize
+            bands(i).movingAvg = bands(i).movingAvg + (bands(i).inOutFreqDiffs - oldestFreqDiff(bandFreqs)) / bufferSize;
+        end
     end
 
     if mod(frameCount, framePeriod) == 0 && frameCount ~= 0
@@ -122,14 +153,20 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
         % always >= 0
         % TODO: Set max limits for gains to prevent distortion
 
+        % define minimum and maximum value thresholds for gain adjustment
+        minValue = 0; min(cellfun(@min, {bands.movingAvg})); % minimum value moving average has
+        maxValue = max(cellfun(@max, {bands.movingAvg})); % maximum value moving average has
+
         for i = 1:numel(bands)
-            bandDiffs = bands(i).inOutFreqDiffs / framePeriod;
-            bandOutSums = bands(i).outFreqSums / framePeriod;
-            if sum(bandDiffs) > sum(bandOutSums)
-                disp('Updating gains for band')
-                inputEq.Gains(bands(i).octaves) = inputEq.Gains(bands(i).octaves) + 1;
-                disp(inputEq.Gains)
-            end
+            % there are probably better / more 'correct' ways to normalize this
+            bandMovingAvgNorm = (bands(i).movingAvg - minValue) / (maxValue - minValue);
+            bandMovingAvgNorm = max(0, min(1, bandMovingAvgNorm));
+            bandGain = bandMovingAvgNorm * 10;
+            disp('Updating gains for band')
+            bands(i).gain = mean(bandGain);
+            disp(bands(i).gain);
+            inputEq.Gains(bands(i).octaves) = bands(i).gain;
+
             bands(i).inOutFreqDiffs(:) = 0;
             bands(i).outFreqSums(:) = 0;
         end

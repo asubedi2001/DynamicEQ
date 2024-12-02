@@ -6,20 +6,23 @@ clc; clear; close all
 
 % human hearing limits: 20 hz to 20khz
 minFrequency = 0;
-maxFrequency = 20000;
+maxFrequency = 22050;
 
 % how many samples to process at a time
 frameLength = 1024;
 
 % audio reader:
-songReader = dsp.AudioFileReader('../audio/rag_crop.wav', 'SamplesPerFrame', frameLength);
+songReader = dsp.AudioFileReader('../audio/porter.wav', 'SamplesPerFrame', frameLength);
 sampleRate = songReader.SampleRate;
+disp(sampleRate)
 % writer -- outputs to speakers:
 deviceWriter = audioDeviceWriter('SampleRate', songReader.SampleRate);
 
 % create frame buffer
-bufferSize = 8;
-frameBuffer = zeros(frameLength, bufferSize);
+% 43.07 frames a second * 2 -> buffer is around ~1.857s long (if bufferSize = 80 and doesnt change)
+bufferSize = 80;
+inputFrameBuffer = zeros(frameLength, bufferSize);
+outputFrameBuffer = zeros(frameLength, bufferSize);
 bufferIdx = 1;
 
 % used to display sound waves while playing:
@@ -72,7 +75,7 @@ gainsPlot = plot(gains, 'DisplayName', 'Gains');
 hold on
 title("Equalizer Gains")
 gainsPlot.YDataSource = 'inputEq.Gains';
-%ylim([-1 inf])
+ylim([-1 inf])
 hold off
 
 bassBand = struct( ...
@@ -80,70 +83,98 @@ bassBand = struct( ...
     'freqRange', [22, 355], ...
     'inOutFreqDiffs', [], ...
     'outFreqSums', [], ...
-    'movingAvg', [] ...
-    );
+    'weightedAvg', [], ...
+    'numFrames', 2, ...
+    'decimation', 4);
 
 midBand = struct( ...
     'octaves', logical([0, 0, 0, 0, 1, 1, 1, 1, 0, 0]), ...
     'freqRange', [355, 5623], ...
     'inOutFreqDiffs', [], ...
     'outFreqSums', [], ...
-    'movingAvg', [] ...
-    );
+    'weightedAvg', [], ...
+    'numFrames', 1, ...
+    'decimation', 2);
 
 trebBand = struct( ...
     'octaves', logical([0, 0, 0, 0, 0, 0, 0, 0, 1, 1]), ...
     'freqRange', [5623, 22387], ...
     'inOutFreqDiffs', [], ...
     'outFreqSums', [], ...
-    'movingAvg', [] ...4
-    );
+    'weightedAvg', [], ...
+    'numFrames', 1, ...
+    'decimation', 1);
 
 bands = [bassBand midBand trebBand];
 
 frameCount = 0;
 framePeriod = 20;
-redrawPeriod = 35;
-while ~isDone(songReader) && frameCount < 900 % use frame count for early stopping TODO: remove
+redrawPeriod = 20;
+while ~isDone(songReader) && frameCount < 2000 % use frame count for early stopping TODO: remove
     audioFrame = songReader();
     outputFrame = inputEq(audioFrame);
-    noiseFrame = sosfilt(sos, wgn(frameLength,1, -0.5));
+    noiseFrame = sosfilt(sos, wgn(frameLength,1, 2)); % limit bandwidth of white noise
     %noiseFrame = wgn(frameLength,1,-25);
     inputFrame = outputFrame + noiseFrame;
 
-    % update buffer (and index) according to current frame
-    frameBuffer(:, bufferIdx) = inputFrame;
+    % update buffers (and index) according to current frame
+    inputFrameBuffer(:, bufferIdx) = inputFrame;
+    outputFrameBuffer(:, bufferIdx) = outputFrame;
     bufferIdx = mod(bufferIdx, bufferSize) + 1;
 
     deviceWriter(inputFrame);
     scope(inputFrame)
 
+    % these FFTs are not necessary; only used for plotting:
     [outputFreqX, outputFreqY] = perform_and_plot_fft(outputFrame, sampleRate, maxFrequency);
     [inputFreqX, inputFreqY] = perform_and_plot_fft(inputFrame, sampleRate, maxFrequency);
 
     for i = 1:numel(bands)
-        bandFreqs = outputFreqX(:) >= bands(i).freqRange(1) & outputFreqX(:) < bands(i).freqRange(2); % outputFreqX should be same as inputFreqX
+        % some of the combined frames may be 0 to begin with:
+        combinedInputFrame = [];
+        for j = 1:bands(i).numFrames
+            combinedInputFrame = cat(1, inputFrameBuffer(:, mod(bufferIdx - j, bufferSize) + 1), combinedInputFrame);
+        end
+
+        combinedOutputFrame = [];
+        for j = 1:bands(i).numFrames
+            combinedOutputFrame = cat(1, outputFrameBuffer(:, mod(bufferIdx - j, bufferSize) + 1), combinedOutputFrame);
+        end
+    
+        % decimate performs low-pass filter then downsamples:
+        decimatedInputFrame = decimate(combinedInputFrame, bands(i).decimation);
+        decimatedOutputFrame = decimate(combinedOutputFrame, bands(i).decimation);
+        decimatedSampleRate = sampleRate/bands(i).decimation;
+        decimatedMaxFrequency = decimatedSampleRate/2;
+
+        [bandInputFreqX, bandInputFreqY] = perform_and_plot_fft(decimatedInputFrame, decimatedSampleRate, decimatedMaxFrequency);
+        [bandOutputFreqX, bandOutputFreqY] = perform_and_plot_fft(decimatedOutputFrame, decimatedSampleRate, decimatedMaxFrequency);
+
+        bandFreqs = bandOutputFreqX(:) >= bands(i).freqRange(1) & bandOutputFreqX(:) < bands(i).freqRange(2); % outputFreqX should be same as inputFreqX
         if isempty(bands(i).inOutFreqDiffs)
             bands(i).inOutFreqDiffs = zeros(sum(bandFreqs), 1);
             bands(i).outFreqSums = zeros(sum(bandFreqs), 1);
-            bands(i).movingAvg = zeros(sum(bandFreqs), 1);
+            bands(i).weightedAvg = zeros(sum(bandFreqs), 1);
         end
-        bands(i).inOutFreqDiffs = bands(i).inOutFreqDiffs + (inputFreqY(bandFreqs) - outputFreqY(bandFreqs));
-        bands(i).outFreqSums = bands(i).outFreqSums + outputFreqY(bandFreqs);
 
-        % update moving average
+        bands(i).inOutFreqDiffs = bands(i).inOutFreqDiffs + (bandInputFreqY(bandFreqs) - bandOutputFreqY(bandFreqs));
+        bands(i).outFreqSums = bands(i).outFreqSums + bandOutputFreqY(bandFreqs);
+
         if frameCount == 0
             % initialize first frame value
-            bands(i).movingAvg = bands(i).inOutFreqDiffs;
+            bands(i).weightedAvg = bands(i).inOutFreqDiffs;
         elseif frameCount <= bufferSize
-            % if buffer is not full update b += (difference - b) / numFrames
-            bands(i).movingAvg = bands(i).movingAvg + (bands(i).inOutFreqDiffs - bands(i).movingAvg) / frameCount;
+            % simple average over the frames in unfilled buffer
+            bands(i).weightedAvg = (inputFrameBuffer(bufferIdx) - outputFrameBuffer(bufferIdx)) / frameCount;
+            frameAvg = zeros(size(bands(i).inOutFreqDiffs));
+            for j = 1:frameCount
+                frameAvg = frameAvg + (inputFrameBuffer(j) - outputFrameBuffer(j));
+            end
+            bands(i).weightedAvg = frameAvg / frameCount;
         else
-            % if buffer full, update according to the last value 
-            oldestFrameIdx = mod(bufferIdx, bufferSize) + 1;
-            oldestFreqDiff = frameBuffer(:, oldestFrameIdx);
-            % b += (difference - (difference bufferSize ago)) / bufferSize
-            bands(i).movingAvg = bands(i).movingAvg + (bands(i).inOutFreqDiffs - oldestFreqDiff(bandFreqs)) / bufferSize;
+            % have importance of older values decay over time
+            decayFactor = 0.6; % decay of old values
+            bands(i).weightedAvg = decayFactor * (bands(i).inOutFreqDiffs) + (1 - decayFactor) * bands(i).weightedAvg;
         end
     end
 
@@ -153,17 +184,18 @@ while ~isDone(songReader) && frameCount < 900 % use frame count for early stoppi
         % always >= 0
         % TODO: Set max limits for gains to prevent distortion
 
-        % define minimum and maximum value thresholds for gain adjustment
-        minValue = 0; min(cellfun(@min, {bands.movingAvg})); % minimum value moving average has
-        maxValue = max(cellfun(@max, {bands.movingAvg})); % maximum value moving average has
+        % define minimum and maximum value thresholds to help nromalize
+        LOWER = -0.75; 
+        UPPER = 0.75; 
 
         for i = 1:numel(bands)
-            % there are probably better / more 'correct' ways to normalize this
-            bandMovingAvgNorm = (bands(i).movingAvg - minValue) / (maxValue - minValue);
-            bandMovingAvgNorm = max(0, min(1, bandMovingAvgNorm));
-            bandGain = bandMovingAvgNorm * 10;
-            disp('Updating gains for band')
-            bands(i).gain = mean(bandGain);
+            % normalize against 'arbitrary' values (fine tuned through testing)
+            bandAvgNormalized = (bands(i).weightedAvg - LOWER) / (UPPER - LOWER);
+            bandAvgNormalized = mean(bandAvgNormalized);
+            bandGain = bandAvgNormalized * 12;
+
+            disp(['Updating gains for band ' num2str(i) ':'])
+            bands(i).gain = bandGain;
             disp(bands(i).gain);
             inputEq.Gains(bands(i).octaves) = bands(i).gain;
 

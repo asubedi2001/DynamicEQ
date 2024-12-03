@@ -113,7 +113,7 @@ redrawPeriod = 20;
 while ~isDone(songReader) && frameCount < 2000 % use frame count for early stopping TODO: remove
     audioFrame = songReader();
     outputFrame = inputEq(audioFrame);
-    noiseFrame = sosfilt(sos, wgn(frameLength,1, 2)); % limit bandwidth of white noise
+    noiseFrame = sosfilt(sos, wgn(frameLength,1, 0)); % limit bandwidth of white noise
     %noiseFrame = wgn(frameLength,1,-25);
     inputFrame = outputFrame + noiseFrame;
 
@@ -185,7 +185,7 @@ while ~isDone(songReader) && frameCount < 2000 % use frame count for early stopp
         % TODO: Set max limits for gains to prevent distortion
 
         % define minimum and maximum value thresholds to help nromalize
-        LOWER = -0.75; 
+        LOWER = 0; 
         UPPER = 0.75; 
 
         for i = 1:numel(bands)
